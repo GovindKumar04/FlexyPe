@@ -1,34 +1,17 @@
-import pool from '../config/db.js';
+import Reservation from '../models/Reservation.js';
+import Inventory from '../models/Inventory.js';
+
+const expireReservations = async () => {
+  const now = new Date();
+  const expired = await Reservation.find({ status: 'RESERVED', expiresAt: { $lte: now } });
+
+  for (const resv of expired) {
+    resv.status = 'EXPIRED';
+    await resv.save();
+    await Inventory.findOneAndUpdate({ sku: resv.sku }, { $inc: { quantity: resv.quantity } });
+  }
+};
 
 export default function startExpiryJob() {
-  setInterval(async () => {
-    const conn = await pool.getConnection();
-    try {
-      await conn.beginTransaction();
-
-      const [rows] = await conn.query(
-        `SELECT * FROM reservations
-         WHERE status = 'RESERVED' AND expires_at < NOW()
-         FOR UPDATE`
-      );
-
-      for (const r of rows) {
-        await conn.query(
-          'UPDATE inventory SET quantity = quantity + ? WHERE sku = ?',
-          [r.quantity, r.sku]
-        );
-
-        await conn.query(
-          'UPDATE reservations SET status = "EXPIRED" WHERE id = ?',
-          [r.id]
-        );
-      }
-
-      await conn.commit();
-    } catch (e) {
-      await conn.rollback();
-    } finally {
-      conn.release();
-    }
-  }, 60000);
+  setInterval(expireReservations, 60 * 1000); // run every 1 min
 }

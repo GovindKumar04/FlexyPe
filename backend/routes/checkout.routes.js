@@ -1,8 +1,5 @@
 import express from 'express';
-import {
-  confirmCheckout,
-  cancelCheckout
-} from '../controllers/checkout.controller.js';
+import { confirmCheckout, cancelCheckout } from '../controllers/checkout.controller.js';
 
 const router = express.Router();
 

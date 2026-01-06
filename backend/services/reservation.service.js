@@ -1,100 +1,54 @@
-import pool from '../config/db.js';
-
-const RESERVE_TTL_MIN = 5;
+import Inventory from '../models/Inventory.js';
+import Reservation from '../models/Reservation.js';
 
 export const reserve = async ({ sku, quantity, idempotencyKey }) => {
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
+  if (!sku || !quantity || !idempotencyKey) throw new Error('Missing fields');
 
-    // Idempotency
-    const [existing] = await conn.query(
-      'SELECT * FROM reservations WHERE idempotency_key = ?',
-      [idempotencyKey]
-    );
+  // Check idempotency
+  let existing = await Reservation.findOne({ idempotencyKey });
+  if (existing) return existing;
 
-    if (existing.length) {
-      await conn.commit();
-      return existing[0];
-    }
-
-    const [inv] = await conn.query(
-      'SELECT quantity FROM inventory WHERE sku = ? FOR UPDATE',
-      [sku]
-    );
-
-    if (!inv.length || inv[0].quantity < quantity) {
-      throw new Error('Insufficient inventory');
-    }
-
-    await conn.query(
-      'UPDATE inventory SET quantity = quantity - ? WHERE sku = ?',
-      [quantity, sku]
-    );
-
-    const expiresAt = new Date(Date.now() + RESERVE_TTL_MIN * 60000);
-
-    const [result] = await conn.query(
-      `INSERT INTO reservations
-       (sku, quantity, status, expires_at, idempotency_key)
-       VALUES (?, ?, 'RESERVED', ?, ?)`,
-      [sku, quantity, expiresAt, idempotencyKey]
-    );
-
-    await conn.commit();
-
-    return { reservationId: result.insertId, expiresAt };
-  } catch (e) {
-    await conn.rollback();
-    throw e;
-  } finally {
-    conn.release();
-  }
-};
-
-export const confirm = async (reservationId) => {
-  const [res] = await pool.query(
-    'UPDATE reservations SET status = "CONFIRMED" WHERE id = ? AND status = "RESERVED"',
-    [reservationId]
+  // Atomic update: decrement inventory if enough quantity
+  const updated = await Inventory.findOneAndUpdate(
+    { sku, quantity: { $gte: quantity } },
+    { $inc: { quantity: -quantity } },
+    { new: true }
   );
 
-  if (!res.affectedRows) {
-    throw new Error('Invalid reservation');
-  }
+  if (!updated) throw new Error('Not enough inventory');
 
-  return { success: true };
+  const expiresAt = new Date(Date.now() + (process.env.RESERVATION_EXPIRY_MINUTES || 5) * 60 * 1000);
+
+  const reservation = await Reservation.create({
+    sku,
+    quantity,
+    idempotencyKey,
+    expiresAt,
+  });
+
+  return reservation;
 };
 
-export const cancel = async (reservationId) => {
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
+export const confirmReservation = async ({ id }) => {
+  const reservation = await Reservation.findById(id);
+  if (!reservation) throw new Error('Reservation not found');
+  if (reservation.status !== 'RESERVED') throw new Error('Cannot confirm this reservation');
 
-    const [[res]] = await conn.query(
-      'SELECT * FROM reservations WHERE id = ? FOR UPDATE',
-      [reservationId]
-    );
+  reservation.status = 'CONFIRMED';
+  await reservation.save();
+  return reservation;
+};
 
-    if (!res || res.status !== 'RESERVED') {
-      throw new Error('Invalid reservation');
-    }
+export const cancelReservation = async ({ id }) => {
+  const reservation = await Reservation.findById(id);
+  if (!reservation) throw new Error('Reservation not found');
+  if (reservation.status !== 'RESERVED') throw new Error('Cannot cancel this reservation');
 
-    await conn.query(
-      'UPDATE inventory SET quantity = quantity + ? WHERE sku = ?',
-      [res.quantity, res.sku]
-    );
+  reservation.status = 'CANCELLED';
+  await reservation.save();
 
-    await conn.query(
-      'UPDATE reservations SET status = "CANCELLED" WHERE id = ?',
-      [reservationId]
-    );
+  // Add back inventory
+  await Inventory.findOneAndUpdate({ sku: reservation.sku }, { $inc: { quantity: reservation.quantity } });
 
-    await conn.commit();
-    return { cancelled: true };
-  } catch (e) {
-    await conn.rollback();
-    throw e;
-  } finally {
-    conn.release();
-  }
+  return reservation;
 };

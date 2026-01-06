@@ -1,24 +1,21 @@
-import {
-  reserve
-} from '../services/reservation.service.js';
+import Inventory from '../models/Inventory.js';
+import { reserve } from '../services/reservation.service.js';
 
 export const reserveInventory = async (req, res) => {
   try {
-    const result = await reserve(req.body);
-    res.json(result);
+    const reservation = await reserve(req.body);
+    res.json(reservation);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 };
 
 export const getInventory = async (req, res) => {
-  const { sku } = req.params;
-  const { default: pool } = await import('../config/db.js');
-
-  const [rows] = await pool.query(
-    'SELECT sku, quantity FROM inventory WHERE sku = ?',
-    [sku]
-  );
-
-  res.json(rows[0] || { sku, quantity: 0 });
+  try {
+    const { sku } = req.params;
+    const item = await Inventory.findOne({ sku });
+    res.json(item || { sku, quantity: 0 });
+  } catch (err) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
 };
